@@ -26,14 +26,15 @@ final class SyncEngine: ObservableObject {
 
     let adapters: [SessionKind: SessionAdapter]
 
-    private let queue = DispatchQueue(label: "com.yurifrl.micsync.engine", qos: .userInitiated)
+    // Internal: SyncEngine+Reconciliation.swift delivers on this queue.
+    let queue = DispatchQueue(label: "com.yurifrl.micsync.engine", qos: .userInitiated)
     private var working = false       // one operation at a time
     private var pendingGoal: MicGoal? // latest command wins — keeps a PTT release alive
     private var lastPosted: [SessionKind: MicState] = [:]
 
     private init() {
         adapters = [
-            .meet: MeetAdapter(),
+            .meet: MeetBridge(),
             .slack: SlackAdapter(),
         ]
     }
@@ -43,19 +44,37 @@ final class SyncEngine: ObservableObject {
     // ----------------------------------------------------------
 
     // Direct orders: applied without reading any state.
-    func mute() { run(.muted) }
-    func unmute() { run(.live) }
+    // `ack` fires once the command settles on the engine queue (or
+    // immediately when the engine is busy and the command is coalesced
+    // into the pending goal). nil keeps the plain trigger behavior —
+    // the keyboard shortcuts pass nothing.
+    func mute(ack: ((Bool) -> Void)? = nil) {
+        command(.mute)
+        run(.muted, ack)
+    }
+
+    func unmute(ack: ((Bool) -> Void)? = nil) {
+        command(.unmute)
+        run(.live, ack)
+    }
 
     // Push-to-talk: hold = live, release always ends muted.
-    func pushToTalk(down: Bool) { down ? unmute() : mute() }
+    func pushToTalk(down: Bool, ack: ((Bool) -> Void)? = nil) {
+        command(.pushToTalk)
+        down ? run(.live, ack) : run(.muted, ack)
+    }
 
     // The one state-needing command: a single reconciliation read
     // decides the flip, and the SAME read's live-session set receives
     // the goal — one read round, then label-directed presses.
-    func toggle() {
+    func toggle(ack: ((Bool) -> Void)? = nil) {
         queue.async { [weak self] in
-            guard let self, !working else { return } // busy: click again
+            guard let self, !working else {
+                ack?(false) // busy: the click was a no-op
+                return
+            }
             working = true
+            command(.toggle)
             reconcileRead { [weak self] table in
                 guard let self else { return }
                 let live = SessionKind.allCases.filter { table[$0]?.inCall == true }
@@ -63,10 +82,13 @@ final class SyncEngine: ObservableObject {
                       let snap = table[first],
                       let goal = MicGoal(from: snap.state.flipped) else {
                     working = false // nothing live, or undecidable state: no guess
+                    Log.warn(.engine, .toggleUndecidable, live.isEmpty ? "no live session" : "mic state undecidable")
+                    ack?(false)
                     return
                 }
                 apply(goal, to: live) { [weak self] in
                     self?.working = false
+                    ack?(true)
                 }
             }
         }
@@ -78,6 +100,7 @@ final class SyncEngine: ObservableObject {
         queue.async { [weak self] in
             guard let self, !working else { return }
             working = true
+            command(.reconcile)
             reconcileRead { [weak self] _ in
                 self?.working = false
             }
@@ -88,19 +111,29 @@ final class SyncEngine: ObservableObject {
     // Command plumbing (engine queue only)
     // ----------------------------------------------------------
 
-    private func run(_ goal: MicGoal) {
+    private func run(_ goal: MicGoal, _ ack: ((Bool) -> Void)? = nil) {
         queue.async { [weak self] in
             guard let self else { return }
             if working {
                 pendingGoal = goal
+                Log.debug(.engine, .busyDrop, "queued latest command; engine busy")
+                // The superseded command is a no-op; the coalesced goal
+                // still runs and reports through ITS ack.
+                ack?(false)
                 return
             }
             working = true
-            applyGoal(goal)
+            applyGoal(goal, ack)
         }
     }
 
-    private func applyGoal(_ goal: MicGoal) {
+    // Command entry: one info line + one countable metric per accepted
+    // command (the busy-drop line is its counterpart when queued).
+    private func command(_ name: CommandName) {
+        Log.info(.engine, .command(name), "accepted")
+    }
+
+    private func applyGoal(_ goal: MicGoal, _ ack: ((Bool) -> Void)? = nil) {
         DispatchQueue.main.async { self.desiredState = goal }
         // Direct order: every adapter self-decides from its control's
         // own label; nothing is read first, nothing verified after.
@@ -109,43 +142,16 @@ final class SyncEngine: ObservableObject {
             if let next = pendingGoal {
                 pendingGoal = nil
                 applyGoal(next)
+                // Superseded: this goal never reached every adapter.
+                ack?(false)
             } else {
                 working = false
+                ack?(true)
             }
         }
     }
 
-    // One probe round across all adapters; publishes the snapshot table
-    // and drops a goal that no longer has a live session. cb fires on
-    // the engine queue with the observed table.
-    private func reconcileRead(cb: @escaping ([SessionKind: SessionSnapshot]) -> Void) {
-        let group = DispatchGroup()
-        var observed: [SessionKind: SessionSnapshot] = [:]
-        let lock = NSLock()
-
-        for (kind, adapter) in adapters {
-            group.enter()
-            adapter.probe { snapshot in
-                if let snapshot {
-                    lock.lock()
-                    observed[kind] = snapshot
-                    lock.unlock()
-                }
-                group.leave()
-            }
-        }
-
-        group.notify(queue: queue) { [weak self] in
-            guard let self else { return }
-            DispatchQueue.main.async { self.snapshots = observed }
-
-            let live = SessionKind.allCases.filter { observed[$0]?.inCall == true }
-            if live.isEmpty, desiredState != nil {
-                DispatchQueue.main.async { self.desiredState = nil }
-            }
-            cb(observed)
-        }
-    }
+    // One probe round lives in SyncEngine+Reconciliation.swift.
 
     // Apply a goal to the given kinds in parallel; cb fires on the
     // engine queue once every adapter has answered.
@@ -168,6 +174,7 @@ final class SyncEngine: ObservableObject {
     private func postSettled(state: MicState, kind: SessionKind) {
         guard lastPosted[kind] != state else { return } // debounce
         lastPosted[kind] = state
+        Log.info(.engine, .transition(kind, state), "posted \(kind.rawValue)=\(state.rawValue)")
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: Self.micStateDidChange,

@@ -1,0 +1,26 @@
+body {
+  width: 200px;
+  font: 13px/1.4 system-ui, sans-serif;
+  margin: 10px;
+  color: #202124;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+.dot.on {
+  background: #34a853;
+}
+.dot.off {
+  background: #9aa0a6;
+}
+.conn.error {
+  color: #d93025;
+}

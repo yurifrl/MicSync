@@ -4,24 +4,16 @@ import ApplicationServices
 
 // Slack huddle backend via the macOS accessibility tree.
 //
-// Slack (Electron/Chromium) exposes its real UI tree only through the
-// FOCUSED WINDOW: from the app element, kAXWindowsAttribute reports zero
-// windows and the direct children carry just the menu bar, so any walk
-// seeded on the app element never reaches the huddle widget. Roots are
-// therefore collected from kAXFocusedWindowAttribute + kAXWindowsAttribute
-// + kAXChildrenAttribute and walked together.
-//
 // Trigger-driven: `apply` is a direct order decided from the control's own
 // label (no state read, no verification press); `probe` is the single-shot
-// read used only by toggle and menu-open reconciliation.
+// read used only by toggle and menu-open reconciliation. AX plumbing
+// (element lookup, bounded walks, roots) lives in AXTree; this adapter
+// owns Slack-specific patterns and decisions.
 
 final class SlackAdapter: SessionAdapter {
     let kind: SessionKind = .slack
 
     private static let slackBundle = "com.tinyspeck.slackmacgap"
-    // Hard cap on AX-tree nodes walked per operation; Chromium trees can be
-    // enormous, and an unbounded walk would stall whatever queue runs it.
-    private static let maxAXNodes = 4000
 
     // Mic-button patterns shared by detection and pressing. Verified
     // against a live huddle: the in-call mic button uses "Mute"/"Unmute"
@@ -52,6 +44,16 @@ final class SlackAdapter: SessionAdapter {
         AXIsProcessTrusted()
     }
 
+    /// Asks macOS to show its own Accessibility consent prompt, which adds
+    /// MicSync to Privacy & Security ▸ Accessibility automatically. The
+    /// manual check never triggers it (untrusted checks fail silently), so
+    /// the app must request the prompt itself — once per launch is enough;
+    /// macOS suppresses duplicates while the request is pending.
+    static func promptForAXTrust() {
+        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
+
     // Returns false (after posting the alert once) when untrusted.
     private func ensureAXPermission() -> Bool {
         guard !Self.isAXTrusted() else { return true }
@@ -75,98 +77,27 @@ final class SlackAdapter: SessionAdapter {
     private let queue = DispatchQueue(label: "com.yurifrl.micsync.slack", qos: .userInitiated)
     private var busy = false // guard reentrancy on the serial AX queue
 
-    // ----------------------------------------------------------
-    // AX primitives
-    // ----------------------------------------------------------
-
-    private func axString(_ element: AXUIElement, _ attribute: String) -> String? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
-              let str = value as? String else { return nil }
-        return str
+    // The control's own label, read the same way everywhere a decision
+    // needs it (description first, then title).
+    private static func label(_ element: AXUIElement) -> String {
+        AXTree.string(element, kAXDescriptionAttribute)
+            ?? AXTree.string(element, kAXTitleAttribute)
+            ?? ""
     }
 
-    private func axChildren(_ element: AXUIElement) -> [AXUIElement] {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success,
-              let arr = value as? [AXUIElement] else { return [] }
-        return arr
-    }
-
-    private final class Budget {
-        var remaining: Int
-        init(_ remaining: Int) { self.remaining = remaining }
-    }
-
-    // Bounded depth-first search for a UI element whose AXDescription,
-    // AXTitle or AXValue matches any pattern. Caps the walk so a huge
-    // Chromium tree can never stall the queue.
-    private func axFind(_ root: AXUIElement, patterns: [String], budget: Budget) -> AXUIElement? {
-        var stack: [AXUIElement] = [root]
-        while !stack.isEmpty, budget.remaining > 0 {
-            let element = stack.removeFirst()
-            budget.remaining -= 1
-
-            let description = axString(element, kAXDescriptionAttribute) ?? ""
-            let title = axString(element, kAXTitleAttribute) ?? ""
-            let value = axString(element, kAXValueAttribute) ?? ""
-
-            for pattern in patterns {
-                if description.range(of: pattern, options: .regularExpression) != nil
-                    || title.range(of: pattern, options: .regularExpression) != nil
-                    || value.range(of: pattern, options: .regularExpression) != nil {
-                    return element
-                }
-            }
-            stack.append(contentsOf: axChildren(element))
-        }
-        return nil
-    }
-
-    // Walk roots: from the app element Chromium exposes only the menu bar
-    // (kAXWindows -> 0, children -> menu bar). The real UI hangs off the
-    // focused window; multi-window Slack (detached huddle windows) makes
-    // kAXWindows useful on some builds, so all reachable roots are walked.
-    private func uiRoots(_ app: AXUIElement) -> [AXUIElement] {
-        var roots: [AXUIElement] = []
-        var windows: CFTypeRef?
-        if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows) == .success {
-            roots.append(contentsOf: (windows as? [AXUIElement]) ?? [])
-        }
-        var focused: CFTypeRef?
-        if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focused) == .success,
-           let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID() {
-            roots.append(f as! AXUIElement)
-        }
-        roots.append(contentsOf: axChildren(app)) // menu bar (+ any exposed shells)
-        return roots
-    }
-
-    // The app element (after nudging AXManualAccessibility for builds that
-    // still honor it) or nil when Slack is not running.
-    private func slackApp() -> AXUIElement? {
-        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: Self.slackBundle).first else {
-            return nil
-        }
-        let element = AXUIElementCreateApplication(app.processIdentifier)
-        var value: CFTypeRef?
-        let current = AXUIElementCopyAttributeValue(
-            element, "AXManualAccessibility" as CFString, &value)
-        if !(current == .success && (value as? Bool) == true) {
-            AXUIElementSetAttributeValue(element, "AXManualAccessibility" as CFString, true as CFBoolean)
-        }
-        return element
+    // Muted-flavored labels ("Turn on…"/"Unmute…") mean the mic is
+    // currently muted. Shared by shouldPress and probe so both decisions
+    // can never drift.
+    private static func labelSaysMuted(_ text: String) -> Bool {
+        text.range(of: "^Turn on", options: .regularExpression) != nil
+            || text.range(of: "^Unmute", options: .regularExpression) != nil
     }
 
     // Should the control be pressed for this goal? Unmute-flavored labels
     // mean the mic is currently muted: a .muted goal is already satisfied
     // (no press), a .live goal needs the press — and vice versa.
     private func shouldPress(_ mic: AXUIElement, _ goal: MicGoal) -> Bool {
-        let label = axString(mic, kAXDescriptionAttribute)
-            ?? axString(mic, kAXTitleAttribute)
-            ?? ""
-        let isMuted = label.range(of: "^Turn on", options: .regularExpression) != nil
-            || label.range(of: "^Unmute", options: .regularExpression) != nil
+        let isMuted = Self.labelSaysMuted(Self.label(mic))
         return (goal, isMuted) == (.live, true) || (goal, isMuted) == (.muted, false)
     }
 
@@ -179,25 +110,36 @@ final class SlackAdapter: SessionAdapter {
             guard let self, !busy else { return cb(false) }
             busy = true
             defer { busy = false }
-            guard ensureAXPermission(), let app = slackApp() else { return cb(false) }
+            let start = DispatchTime.now()
+            guard ensureAXPermission() else {
+                Log.warn(.slack, .adapterResult(.slack, .apply, ok: false, durationMs: Timing.ms(since: start)), "no Accessibility permission")
+                return cb(false)
+            }
+            guard let app = AXTree.appElement(bundleID: Self.slackBundle) else {
+                Log.debug(.slack, .adapterResult(.slack, .apply, ok: false, durationMs: Timing.ms(since: start)), "Slack not running")
+                return cb(false)
+            }
 
             // Direct order: find a decidable mic control across all UI
             // roots and decide from its own label. "Not muted" / sidebar
             // rows are excluded by micPatterns.
-            let budget = Budget(Self.maxAXNodes)
+            let budget = AXTree.Budget(AXTree.maxNodes)
             var mic: AXUIElement?
-            for root in uiRoots(app) {
-                if let hit = axFind(root, patterns: Self.micPatterns, budget: budget) {
+            for root in AXTree.uiRoots(app) {
+                if let hit = AXTree.find(root, patterns: Self.micPatterns, budget: budget) {
                     mic = hit
                     break
                 }
             }
             guard let mic else {
+                Log.debug(.slack, .adapterResult(.slack, .apply, ok: false, durationMs: Timing.ms(since: start)), "no huddle or decidable mic control")
                 return cb(false) // no huddle (or no decidable control)
             }
-            if shouldPress(mic, goal) {
+            let press = shouldPress(mic, goal)
+            if press {
                 AXUIElementPerformAction(mic, kAXPressAction as CFString)
             }
+            Log.debug(.slack, .adapterResult(.slack, .apply, ok: true, durationMs: Timing.ms(since: start)), press ? "pressed" : "already held")
             cb(true) // the press (or the already-holding goal) settles it
         }
     }
@@ -208,35 +150,39 @@ final class SlackAdapter: SessionAdapter {
             guard let self, !busy else { return cb(nil) }
             busy = true
             defer { busy = false }
-            guard Self.isAXTrusted(), let app = slackApp() else { return cb(nil) }
+            let start = DispatchTime.now()
+            // One logging funnel: every completion path reports here.
+            let respond: (SessionSnapshot?) -> Void = { snap in
+                Log.debug(.slack, .adapterResult(.slack, .probe, ok: snap != nil, durationMs: Timing.ms(since: start)),
+                          snap == nil ? "Slack not running / no AX trust" : "answered")
+                cb(snap)
+            }
+            guard Self.isAXTrusted(), let app = AXTree.appElement(bundleID: Self.slackBundle) else {
+                return respond(nil)
+            }
 
-            let budget = Budget(Self.maxAXNodes)
+            let budget = AXTree.Budget(AXTree.maxNodes)
             var session: AXUIElement?
-            for root in uiRoots(app) {
-                if let hit = axFind(root, patterns: Self.sessionPatterns, budget: budget) {
+            for root in AXTree.uiRoots(app) {
+                if let hit = AXTree.find(root, patterns: Self.sessionPatterns, budget: budget) {
                     session = hit
                     break
                 }
             }
-            guard session != nil else { return cb(SessionSnapshot(kind: .slack, inCall: false, state: .unknown)) }
+            guard session != nil else { return respond(SessionSnapshot(kind: .slack, inCall: false, state: .unknown)) }
 
             var mic: AXUIElement?
-            for root in uiRoots(app) {
-                if let hit = axFind(root, patterns: Self.micPatterns, budget: budget) {
+            for root in AXTree.uiRoots(app) {
+                if let hit = AXTree.find(root, patterns: Self.micPatterns, budget: budget) {
                     mic = hit
                     break
                 }
             }
             guard let mic else {
-                return cb(SessionSnapshot(kind: .slack, inCall: true, state: .unknown))
+                return respond(SessionSnapshot(kind: .slack, inCall: true, state: .unknown))
             }
-            let label = axString(mic, kAXDescriptionAttribute)
-                ?? axString(mic, kAXTitleAttribute)
-                ?? ""
-            let state: MicState = label.range(of: "^Turn on", options: .regularExpression) != nil
-                || label.range(of: "^Unmute", options: .regularExpression) != nil
-                ? .muted : .live
-            cb(SessionSnapshot(kind: .slack, inCall: true, state: state))
+            let state: MicState = Self.labelSaysMuted(Self.label(mic)) ? .muted : .live
+            respond(SessionSnapshot(kind: .slack, inCall: true, state: state))
         }
     }
 }

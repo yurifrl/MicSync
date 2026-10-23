@@ -1,0 +1,74 @@
+name: Extension Release
+
+# Tag-closed releases for the Chrome extension: push an `extension-v*` tag
+# (e.g. extension-v0.2.0) and this workflow validates the extension, zips it,
+# and publishes a GitHub Release with the zip and its SHA-256 checksums.
+# The tag version must equal manifest.json's version — a mismatch fails the
+# gate and leaves the tag without a release.
+#
+# workflow_dispatch runs are validation runs only: they exercise the checks
+# and fail fast before packaging (no release is created).
+
+on:
+  push:
+    tags:
+      - "extension-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: extension-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches manifest version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION="${GITHUB_REF_NAME#extension-v}"
+          MANIFEST_VERSION=$(node -p "require('./micsync-chrome-extension/manifest.json').version")
+          if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::error::Tag extension-v$VERSION does not match manifest version $MANIFEST_VERSION"
+            exit 1
+          fi
+
+      - name: Validate extension
+        run: |
+          cd micsync-chrome-extension
+          node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8'))" \
+            || { echo "::error::manifest.json is not valid JSON"; exit 1; }
+          for f in background.js shared.js popup/popup.js content/content.js; do
+            node --check "$f" || { echo "::error::syntax error in $f"; exit 1; }
+          done
+          echo "extension OK"
+
+      - name: Package
+        run: |
+          VERSION=$(node -p "require('./micsync-chrome-extension/manifest.json').version")
+          ZIP="micsync-chrome-extension-$VERSION.zip"
+          # Zip with the folder at the root: unzipping yields
+          # micsync-chrome-extension/, ready for "Load unpacked".
+          zip -r "$ZIP" micsync-chrome-extension -x '*/.*'
+          shasum -a 256 "$ZIP" > SHA256SUMS
+          cat SHA256SUMS
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "Chrome extension $VERSION" \
+            "micsync-chrome-extension-$VERSION.zip" SHA256SUMS

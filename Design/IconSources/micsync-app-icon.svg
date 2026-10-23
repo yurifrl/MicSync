@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="170" y1="104" x2="858" y2="934" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#31A8FF"/>
+      <stop offset="0.55" stop-color="#1473E6"/>
+      <stop offset="1" stop-color="#253FC7"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="512" y1="64" x2="512" y2="960" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="0.48" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="1" stop-color="#071A72" stop-opacity="0.14"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="206" fill="url(#tile)"/>
+  <rect x="64" y="64" width="896" height="896" rx="206" fill="url(#shine)"/>
+  <path d="M292 365C357 203 591 155 740 273" fill="none" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round"/>
+  <path d="M738 273L721 181M738 273L645 265" fill="none" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M732 659C648 824 407 855 274 714" fill="none" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round"/>
+  <path d="M276 714L288 806M276 714L369 726" fill="none" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="410" y="270" width="204" height="340" rx="102" fill="#FFFFFF"/>
+  <path d="M334 496V514C334 621 414 704 512 704C610 704 690 621 690 514V496" fill="none" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round"/>
+  <path d="M512 704V801M414 801H610" fill="none" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round"/>
+</svg>

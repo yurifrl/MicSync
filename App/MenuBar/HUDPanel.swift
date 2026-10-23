@@ -48,7 +48,7 @@ final class HUDPanel: NSPanel {
         // Backend setup failures: show what to fix (bypasses the HUD-enabled
         // preference — without the hint the backend is simply dead).
         setupIssueObserver = NotificationCenter.default.addObserver(
-            forName: MeetAdapter.micSetupIssue,
+            forName: MeetBridge.setupIssue,
             object: nil,
             queue: .main
         ) { [weak self] notification in

@@ -6,6 +6,8 @@ derivedData/
 MicSync.xcodeproj
 build/
 *.dmg
+*.zip
 SHA256SUMS
+.mutedeck-re/
 .git/
 .omp
