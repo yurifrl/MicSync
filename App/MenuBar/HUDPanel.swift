@@ -45,10 +45,17 @@ final class HUDPanel: NSPanel {
             self?.present(from: notification)
         }
 
-        // Chrome setup failure: show what to fix (bypasses the HUD-enabled
-        // preference — without this hint Meet control is simply dead).
+        // Backend setup failures: show what to fix (bypasses the HUD-enabled
+        // preference — without the hint the backend is simply dead).
         setupIssueObserver = NotificationCenter.default.addObserver(
             forName: MeetAdapter.micSetupIssue,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.presentSetupIssue(from: notification)
+        }
+        setupIssueObserver = NotificationCenter.default.addObserver(
+            forName: SlackAdapter.axPermissionIssue,
             object: nil,
             queue: .main
         ) { [weak self] notification in
@@ -97,7 +104,7 @@ final class HUDPanel: NSPanel {
     // MARK: - Presentation
 
     private func presentSetupIssue(from notification: Notification) {
-        appLabel.stringValue = "Chrome setup required"
+        appLabel.stringValue = (notification.userInfo?["title"] as? String) ?? "Chrome setup required"
         stateLabel.stringValue = (notification.userInfo?["message"] as? String)
             ?? "Enable View ▸ Developer ▸ Allow JavaScript from Apple Events"
 

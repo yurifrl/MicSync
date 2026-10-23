@@ -35,6 +35,19 @@ final class SlackAdapter: SessionAdapter {
     // by any word "huddle" alone — the sidebar contains huddle rows offline.
     private static let sessionPatterns = ["^Leave huddle$", "^End huddle$", "^Leave conversation$"]
 
+    // Posted (once, main thread) when the app's own Accessibility
+    // permission is missing. Untrusted AX calls fail SILENTLY (no error,
+    // no prompt), so without this the Slack backend just reads as dead.
+    static let axPermissionIssue = Notification.Name("AxPermissionIssue")
+
+    private var axIssuePosted = false
+
+    /// Reports whether this process holds the Accessibility permission
+    /// needed for AXManualAccessibility + huddle control.
+    static func isAXTrusted() -> Bool {
+        AXIsProcessTrusted()
+    }
+
     private let queue = DispatchQueue(label: "com.yurifrl.micsync.slack", qos: .userInitiated)
     private var busy = false // guard reentrancy on the serial AX queue
 
@@ -135,11 +148,27 @@ final class SlackAdapter: SessionAdapter {
             guard let self, !busy else { return cb(nil) }
             busy = true
             defer { busy = false }
+            guard Self.isAXTrusted() else {
+                if !axIssuePosted {
+                    axIssuePosted = true
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(
+                            name: Self.axPermissionIssue,
+                            object: nil,
+                            userInfo: [
+                                "title": "Accessibility permission required",
+                                "message": "System Settings ▸ Privacy & Security ▸ Accessibility ▸ enable MicSync (needed to mute Slack huddles)",
+                                "kind": SessionKind.slack,
+                            ]
+                        )
+                    }
+                }
+                return cb(nil)
+            }
             guard let root = slackReady() else { return cb(nil) }
             cb(self.snapshot(from: self.huddlesData(root)))
         }
     }
-
     // Perform the action on the huddle mic toggle; cb(verified).
     func set(_ desired: MicState, cb: @escaping (Bool) -> Void) {
         queue.async { [weak self] in
