@@ -233,6 +233,10 @@ final class MeetAdapter: SessionAdapter {
         let state: String?
     }
 
+    private struct ActJSON: Decodable {
+        let ok: Bool
+    }
+
     // The JS already classifies via the aria-label regexes and reports
     // 'live' | 'muted' | 'unknown'; map those strings directly.
     private func micState(fromState raw: String?) -> MicState {
@@ -255,6 +259,8 @@ final class MeetAdapter: SessionAdapter {
     // SessionAdapter
     // ----------------------------------------------------------
 
+    // The ONE state query — used only by toggle and menu-open
+    // reconciliation, never on a timer.
     func probe(_ cb: @escaping (SessionSnapshot?) -> Void) {
         guard chromeRunning() else { return cb(nil) }
         jsOnFirstMeetTab(Self.PROBE_JS) { [weak self] out, err in
@@ -272,26 +278,28 @@ final class MeetAdapter: SessionAdapter {
         }
     }
 
-    func set(_ desired: MicState, cb: @escaping (Bool) -> Void) {
+    // Direct order: ONE subprocess. The JS reads the label only to
+    // decide whether pressing produces the goal, presses when it does,
+    // and reports — no second subprocess, no re-probe.
+    func apply(_ goal: MicGoal, cb: @escaping (Bool) -> Void) {
         guard chromeRunning() else { return cb(false) }
-        let action = desired == .muted ? "mute" : "unmute"
-        jsOnFirstMeetTab(Self.actJS(action: action)) { [weak self] out, err in
+        let action = goal == .muted ? "mute" : "unmute"
+        jsOnFirstMeetTab(Self.actJS(action: action)) { out, err in
             if let err {
-                self?.checkSetupError(err)
+                self.checkSetupError(err)
                 return cb(false)
             }
-            guard let self, let out else { return cb(false) }
-            if out.trimmingCharacters(in: .whitespacesAndNewlines) == "SKIP" {
-                return cb(false) // not in a call
+            guard let out else { return cb(false) }
+            let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed == "SKIP" { return cb(false) } // not in a call
+            guard let data = self.extractJSON(from: out),
+                  let payload = try? JSONDecoder().decode(ActJSON.self, from: data) else {
+                return cb(false)
             }
-            // The click settles asynchronously in the DOM; verify by
-            // re-probe: success = resulting state == desired.
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                guard let self else { return cb(false) }
-                self.probe { snapshot in
-                    cb(snapshot?.inCall == true && snapshot?.state == desired)
-                }
-            }
+            // ok=true means a press happened (or the goal already held —
+            // both settle the command); ok=false means no mic button
+            // existed to decide from.
+            cb(payload.ok)
         }
     }
 }

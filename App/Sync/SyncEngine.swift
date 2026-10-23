@@ -1,31 +1,34 @@
 import Foundation
 import Combine
 
-// Owns the single desired mic state and forces it on every live session.
-// The probe loop runs on a background queue; all AppleScript/AX work lives
-// inside the adapters, which are also fully asynchronous, so nothing here
-// can block the main run loop.
+// Trigger-driven command engine. There is NO background loop: the app
+// costs zero CPU between triggers. Every trigger either issues a direct
+// order (mute/unmute/PTT — no state read at all) or performs ONE
+// reconciliation read (toggle, menu open) and acts on what it learned.
+//
+// External state changes (muting from inside Slack/Meet directly) are
+// picked up at the next trigger, not before. Instant push-style sync is
+// the Chrome-extension bridge's job, not polling's.
 
 final class SyncEngine: ObservableObject {
     static let shared = SyncEngine()
 
-    // Posted whenever the enforced state settles on a session (HUD/sound).
+    // Posted when a command settles on a session (HUD/sound).
     // userInfo["state"] = MicState, userInfo["kind"] = SessionKind.
     static let micStateDidChange = Notification.Name("MicStateDidChange")
 
-    private let probeInterval: TimeInterval = 2.0
-    private let nodeBudget = 4000 // Slack AX walk cap; engine only passes intent through.
-
+    // Last reconciliation read; the menu is built from this.
     @Published var snapshots: [SessionKind: SessionSnapshot] = [:]
-    // nil = no live session to hold a state for.
-    @Published var desiredState: MicState?
+
+    // The goal the app last accepted. Set the moment a command runs;
+    // cleared by reconciliation when no session is live.
+    @Published var desiredState: MicGoal?
 
     let adapters: [SessionKind: SessionAdapter]
 
     private let queue = DispatchQueue(label: "com.yurifrl.micsync.engine", qos: .userInitiated)
-    private var probeTimer: DispatchSourceTimer?
-    private var probing = false
-    private var enforcing = false
+    private var working = false       // one operation at a time
+    private var pendingGoal: MicGoal? // latest command wins — keeps a PTT release alive
     private var lastPosted: [SessionKind: MicState] = [:]
 
     private init() {
@@ -33,67 +36,89 @@ final class SyncEngine: ObservableObject {
             .meet: MeetAdapter(),
             .slack: SlackAdapter(),
         ]
-        startProbeLoop()
     }
 
     // ----------------------------------------------------------
-    // Public controls
+    // Triggers
     // ----------------------------------------------------------
 
-    // Flip the mic of the first live session; the resulting desired state
-    // is then enforced on every live session (mute once, all follow).
+    // Direct orders: applied without reading any state.
+    func mute() { run(.muted) }
+    func unmute() { run(.live) }
+
+    // Push-to-talk: hold = live, release always ends muted.
+    func pushToTalk(down: Bool) { down ? unmute() : mute() }
+
+    // The one state-needing command: a single reconciliation read
+    // decides the flip, and the SAME read's live-session set receives
+    // the goal — one read round, then label-directed presses.
     func toggle() {
         queue.async { [weak self] in
-            guard let self else { return }
-            let current = actionTargets().compactMap { kind -> MicState? in
-                let state = self.snapshots[kind]?.state
-                return (state == .live || state == .muted) ? state : nil
+            guard let self, !working else { return } // busy: click again
+            working = true
+            reconcileRead { [weak self] table in
+                guard let self else { return }
+                let live = SessionKind.allCases.filter { table[$0]?.inCall == true }
+                guard let first = live.first,
+                      let snap = table[first],
+                      let goal = MicGoal(from: snap.state.flipped) else {
+                    working = false // nothing live, or undecidable state: no guess
+                    return
+                }
+                apply(goal, to: live) { [weak self] in
+                    self?.working = false
+                }
             }
-            guard let state = current.first else { return }
-            desiredState = state.flipped
-            enforce()
         }
     }
 
-    func mute() {
+    // Menu-open reconciliation: one read round refreshes the snapshot
+    // table; a goal whose sessions have all ended is dropped.
+    func reconcile() {
         queue.async { [weak self] in
-            guard let self else { return }
-            desiredState = .muted
-            enforce()
+            guard let self, !working else { return }
+            working = true
+            reconcileRead { [weak self] _ in
+                self?.working = false
+            }
         }
-    }
-
-    func unmute() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            desiredState = .live
-            enforce()
-        }
-    }
-
-    // Push-to-talk: while held the mic is live; release always ends muted.
-    func pushToTalk(down: Bool) {
-        down ? unmute() : mute()
     }
 
     // ----------------------------------------------------------
-    // Probe loop (background queue, 2s)
+    // Command plumbing (engine queue only)
     // ----------------------------------------------------------
 
-    private func startProbeLoop() {
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + probeInterval, repeating: probeInterval)
-        timer.setEventHandler { [weak self] in self?.tick() }
-        timer.resume()
-        probeTimer = timer
-        // First sweep immediately.
-        queue.async { [weak self] in self?.tick() }
+    private func run(_ goal: MicGoal) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if working {
+                pendingGoal = goal
+                return
+            }
+            working = true
+            applyGoal(goal)
+        }
     }
 
-    private func tick() {
-        guard !probing else { return }
-        probing = true
+    private func applyGoal(_ goal: MicGoal) {
+        DispatchQueue.main.async { self.desiredState = goal }
+        // Direct order: every adapter self-decides from its control's
+        // own label; nothing is read first, nothing verified after.
+        apply(goal, to: SessionKind.allCases) { [weak self] in
+            guard let self else { return }
+            if let next = pendingGoal {
+                pendingGoal = nil
+                applyGoal(next)
+            } else {
+                working = false
+            }
+        }
+    }
 
+    // One probe round across all adapters; publishes the snapshot table
+    // and drops a goal that no longer has a live session. cb fires on
+    // the engine queue with the observed table.
+    private func reconcileRead(cb: @escaping ([SessionKind: SessionSnapshot]) -> Void) {
         let group = DispatchGroup()
         var observed: [SessionKind: SessionSnapshot] = [:]
         let lock = NSLock()
@@ -112,65 +137,36 @@ final class SyncEngine: ObservableObject {
 
         group.notify(queue: queue) { [weak self] in
             guard let self else { return }
-            probing = false
             DispatchQueue.main.async { self.snapshots = observed }
 
-            // Session ended while a desired state was held -> drop it.
-            if desiredState != nil, actionTargets(in: observed).isEmpty {
+            let live = SessionKind.allCases.filter { observed[$0]?.inCall == true }
+            if live.isEmpty, desiredState != nil {
                 DispatchQueue.main.async { self.desiredState = nil }
-                return
             }
-
-            // Self-healing: a session whose observed state drifted from the
-            // desired state gets re-enforced on the next tick.
-            enforce(in: observed)
+            cb(observed)
         }
     }
 
-    // ----------------------------------------------------------
-    // Enforcement
-    // ----------------------------------------------------------
-
-    // Sessions that should currently be driven to the desired state:
-    // every live session — mute once, all follow.
-    private func actionTargets(in pool: [SessionKind: SessionSnapshot]? = nil) -> [SessionKind] {
-        let table = pool ?? snapshots
-        return SessionKind.allCases.filter { table[$0]?.inCall == true }
-    }
-
-    // Idempotent: adapters only press when their observed state differs.
-    private func enforce(in pool: [SessionKind: SessionSnapshot]? = nil) {
-        guard let desired = desiredState, !enforcing else { return }
-        let targets = actionTargets(in: pool)
-        guard !targets.isEmpty else { return }
-
-        enforcing = true
+    // Apply a goal to the given kinds in parallel; cb fires on the
+    // engine queue once every adapter has answered.
+    private func apply(_ goal: MicGoal, to kinds: [SessionKind], cb: @escaping () -> Void) {
         let group = DispatchGroup()
-
-        for kind in targets {
-            guard let adapter = adapters[kind],
-                  let snap = (pool ?? snapshots)[kind] else { continue }
-            if snap.state == desired {
-                // Already settled — announce (debounced by lastPosted).
-                postSettled(state: desired, kind: kind)
-                continue
-            }
+        for kind in kinds {
+            guard let adapter = adapters[kind] else { continue }
             group.enter()
-            adapter.set(desired) { ok in
+            adapter.apply(goal) { [weak self] ok in
+                guard let self else { group.leave(); return }
                 self.queue.async {
-                    if ok { self.postSettled(state: desired, kind: kind) }
+                    if ok { self.postSettled(state: goal.state, kind: kind) }
                     group.leave()
                 }
             }
         }
-
-        group.notify(queue: queue) { [weak self] in
-            self?.enforcing = false
-        }
+        group.notify(queue: queue, execute: cb)
     }
 
     private func postSettled(state: MicState, kind: SessionKind) {
-        guard lastPosted[kind] != state else { return } // debounce: no change, no post
+        guard lastPosted[kind] != state else { return } // debounce
         lastPosted[kind] = state
         DispatchQueue.main.async {
             NotificationCenter.default.post(
@@ -180,5 +176,4 @@ final class SyncEngine: ObservableObject {
             )
         }
     }
-
 }

@@ -140,9 +140,9 @@ final class HUDPanel: NSPanel {
         // Respect Preferences.hudEnabled at event time (checked live, no cache).
         guard Preferences().hudEnabled else { return }
 
-        // Engine carries state + kind in userInfo; fall back to live engine
-        // reads if the cast ever misses.
-        let state = (notification.userInfo?["state"] as? MicState) ?? engine.desiredState ?? .unknown
+        // Engine carries state + kind in userInfo; notifications always
+        // carry the settled state, so no engine fallback is needed.
+        guard let state = notification.userInfo?["state"] as? MicState else { return }
         let kind = (notification.userInfo?["kind"] as? SessionKind) ?? .meet
 
         switch state {

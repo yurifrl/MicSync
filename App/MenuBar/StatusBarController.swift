@@ -3,8 +3,8 @@ import Combine
 import LaunchAtLogin
 
 // Owns the NSStatusItem. Plain left-click toggles the mic directly; the
-// menu opens on right-click (or option-click). Title is a bare glyph —
-// no suffixes. The menu is rebuilt from live engine state on every open.
+// menu opens on right-click (or option-click). The image is a monochrome
+// template asset so macOS renders it correctly in every menu-bar appearance.
 final class StatusBarController: NSObject, NSMenuDelegate {
     private let engine: SyncEngine
     private let onOpenSettings: () -> Void
@@ -12,7 +12,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private var cancellables: Set<AnyCancellable> = []
-    private var stateObserver: NSObjectProtocol?
+    // NSMenu has no isVisible; popUp() presents it outside the normal
+    // run-loop path, so track the window manually for in-place refresh.
+    private var menuIsOpen = false
 
     init(engine: SyncEngine, onOpenSettings: @escaping () -> Void) {
         self.engine = engine
@@ -35,9 +37,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     deinit {
-        if let stateObserver {
-            NotificationCenter.default.removeObserver(stateObserver)
-        }
         cancellables.removeAll()
         NSStatusBar.system.removeStatusItem(statusItem)
     }
@@ -49,7 +48,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             || (NSApp.currentEvent?.modifierFlags.contains(.option) ?? false)
         if rightClick {
             // Pop the options menu without consuming the click.
+            menuIsOpen = true
             menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+            menuIsOpen = false // popUp blocks until the menu closes
         } else {
             engine.toggle()
         }
@@ -60,24 +61,30 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private func observeEngine() {
         Publishers.CombineLatest(engine.$desiredState, engine.$snapshots)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.rebuildTitle() }
+            .sink { [weak self] _ in
+                guard let self else { return }
+                rebuildTitle()
+                // A reconciliation landing while the menu is open
+                // refreshes the open menu in place (no re-reconcile —
+                // menuNeedsUpdate is the only reconcile trigger).
+                if menuIsOpen { rebuildMenuItems() }
+            }
             .store(in: &cancellables)
+    }
 
-        // Belt-and-braces: the engine also posts on every effective change.
-        stateObserver = NotificationCenter.default.addObserver(
-            forName: SyncEngine.micStateDidChange,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.rebuildTitle()
+    private var statusImageName: NSImage.Name {
+        switch engine.desiredState {
+        case .some(.live): return NSImage.Name("MicLive")
+        case .some(.muted): return NSImage.Name("MicMuted")
+        case .none: return NSImage.Name("MicUnknown")
         }
     }
 
-    private var glyph: String {
+    private var statusDescription: String {
         switch engine.desiredState {
-        case .some(.live): return "🎙"
-        case .some(.muted): return "🔇"
-        case .some(.unknown), .none: return "❔"
+        case .some(.live): return "Microphone live"
+        case .some(.muted): return "Microphone muted"
+        case .none: return "No active session"
         }
     }
 
@@ -87,12 +94,27 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private func rebuildTitle() {
-        statusItem.button?.title = glyph
+        guard let button = statusItem.button else { return }
+        let image = NSImage(named: statusImageName)
+        image?.isTemplate = true
+        button.image = image
+        button.imagePosition = .imageOnly
+        button.title = ""
+        button.toolTip = statusDescription
+        button.setAccessibilityLabel(statusDescription)
     }
 
     // MARK: - Menu (rebuilt on every open)
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // Menu open is a reconciliation trigger: one read round refreshes
+        // the snapshot table (published -> live refresh above), and a
+        // goal with no live session is dropped.
+        engine.reconcile()
+        rebuildMenuItems()
+    }
+
+    private func rebuildMenuItems() {
         menu.removeAllItems()
 
         for kind in liveSessions {
