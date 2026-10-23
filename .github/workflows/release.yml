@@ -28,7 +28,9 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-15
+    # xcode-27 image: the vendored KeyboardShortcuts (3.1.0) declares
+    # swift-tools-version:6.2, rejected by Xcode 16.4 on the macos-15 image.
+    runs-on: xcode-27
     env:
       DEVELOPER_ID_APPLICATION: ${{ vars.DEVELOPER_ID_APPLICATION }}
     steps:
