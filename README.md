@@ -6,7 +6,7 @@ Menu-bar app that keeps your microphone state in sync across **Google Meet (Chro
 
 ## What it does
 
-- **Session detection** — polls every 2s:
+- **Session detection** — event-driven, zero polling between triggers:
   - **Google Meet** — via the bundled Chrome extension (`micsync-chrome-extension/`); it connects to the app's local WebSocket server (`ws://127.0.0.1:8895/ws`) and drives the Meet tab directly. Load it once from `chrome://extensions` → *Load unpacked*.
   - **Slack** — live huddle in the desktop app; reads/presses the mic button through the Accessibility tree.
 - **Sync engine** — holds ONE desired state and enforces it on every live session; if an app drifts (self-mute, page reload), the next tick corrects it.
