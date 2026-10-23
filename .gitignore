@@ -8,3 +8,4 @@ build/
 *.dmg
 SHA256SUMS
 .git/
+.omp

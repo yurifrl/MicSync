@@ -55,6 +55,12 @@ final class MeetAdapter: SessionAdapter {
     // Single AppleScript that scans every window/tab URL, then executes JS
     // in the FIRST meet.google.com tab it finds (any window). One
     // subprocess round-trip per operation.
+    //
+    // Frozen tabs: Chrome suspends background-tab renderers, and JS
+    // injected into a suspended tab returns undefined -> osascript prints
+    // "missing value". That is reported as the literal "FROZEN" so the
+    // adapter can retry through the recovery script (activate the tab,
+    // wait for the renderer to resume, execute again).
     private static func meetScript(js: String) -> String {
         """
         tell application "Google Chrome"
@@ -71,7 +77,33 @@ final class MeetAdapter: SessionAdapter {
             if found then exit repeat
           end repeat
           if not found then return "NOTAB"
+          if theResult is missing value then return "FROZEN"
           return theResult
+        end tell
+        """
+    }
+
+    // Recovery for a frozen Meet tab: activate the tab (the renderer
+    // resumes when its tab becomes active), wait, then execute. Runs in
+    // the same subprocess — the wait never touches the main run loop.
+    // Tab activation briefly switches the visible tab, so callers rate
+    // limit this (see lastRecovery).
+    private static func recoveryScript(js: String) -> String {
+        """
+        tell application "Google Chrome"
+          repeat with w from 1 to count of windows
+            set tcount to count of tabs of window w
+            repeat with t from 1 to tcount
+              if URL of tab t of window w contains "\(meetURLMarker)" then
+                set active tab index of window w to t
+                delay 2.5
+                set theResult to execute tab t of window w javascript "\(js)"
+                if theResult is missing value then return "FROZEN"
+                return theResult
+              end if
+            end repeat
+          end repeat
+          return "NOTAB"
         end tell
         """
     }
@@ -82,6 +114,11 @@ final class MeetAdapter: SessionAdapter {
 
     private let queue = DispatchQueue(label: "com.yurifrl.micsync.meet", qos: .userInitiated)
     private var setupIssuePosted = false
+    // Frozen-tab recovery rate limit: tab activation is visible (it flips
+    // the user's tab), so at most once per this interval, and only when a
+    // probe/act actually returned FROZEN.
+    private let recoveryCooldown: TimeInterval = 30
+    private var lastRecovery: Date?
 
     private func chromeRunning() -> Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundle).isEmpty
@@ -114,14 +151,16 @@ final class MeetAdapter: SessionAdapter {
                 lock.lock(); errData.append(handle.availableData); lock.unlock()
             }
 
-            process.terminationHandler = { _ in
+            process.terminationHandler = { [weak self] _ in
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
                 lock.lock()
                 let out = String(data: outData, encoding: .utf8) ?? ""
                 let err = String(data: errData, encoding: .utf8) ?? ""
                 lock.unlock()
-                cb(out, process.terminationStatus != 0 ? (err.isEmpty ? out : err) : nil)
+                // Deliver on the adapter's serial queue: completion state
+                // (setupIssuePosted, lastRecovery) is only touched there.
+                self?.queue.async { cb(out, process.terminationStatus != 0 ? (err.isEmpty ? out : err) : nil) }
             }
 
             do {
@@ -135,6 +174,8 @@ final class MeetAdapter: SessionAdapter {
     }
 
     // Run JS in the first Meet tab; cb(outString|nil, errString|nil).
+    // "missing value" (a suspended background renderer) retries once
+    // through the recovery script when the cooldown allows it.
     private func jsOnFirstMeetTab(_ js: String, cb: @escaping (String?, String?) -> Void) {
         runASAsync(Self.meetScript(js: js)) { [weak self] out, err in
             guard let self else { return }
@@ -144,8 +185,28 @@ final class MeetAdapter: SessionAdapter {
             }
             setupIssuePosted = false // a successful run clears the issue; a relapse re-alerts
             if out.contains("NOTAB") { return cb(nil, nil) }
+            if out.contains("FROZEN") {
+                guard self.recoveryAllowed() else { return cb(nil, nil) }
+                self.runASAsync(Self.recoveryScript(js: js)) { out2, err2 in
+                    if let err2 { self.checkSetupError(err2); return cb(nil, err2) }
+                    if out2.contains("NOTAB") { return cb(nil, nil) }
+                    // FROZEN again even after activation: report no data
+                    // this round; the next poll retries after the cooldown.
+                    cb(out2.contains("FROZEN") ? nil : out2, nil)
+                }
+                return
+            }
             cb(out, nil)
         }
+    }
+
+    private func recoveryAllowed() -> Bool {
+        // Called on the adapter queue only (callbacks are marshaled there).
+        if let last = lastRecovery, Date().timeIntervalSince(last) < recoveryCooldown {
+            return false
+        }
+        lastRecovery = Date()
+        return true
     }
 
     private func checkSetupError(_ err: String) {
