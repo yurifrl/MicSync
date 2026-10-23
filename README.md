@@ -2,7 +2,7 @@
 
 Menu-bar app that keeps your microphone state in sync across **Google Meet (Chrome)** and **Slack (desktop app)**. Toggle once, both follow. It detects live sessions, shows the state in the menu bar, and enforces one desired state everywhere.
 
-> Status bar shows 🎙 live / 🔇 muted / ❔ unknown, with a `(M)`/`(S)` suffix pinning the target when both sessions are live.
+> Status bar shows 🎙 live / 🔇 muted / ❔ unknown. Left-click toggles; right-click (or option-click) opens the menu.
 
 ## What it does
 
@@ -24,6 +24,10 @@ All five (toggle, mute, unmute, push-to-talk, switch target) are recorded in Set
 - Accessibility permission (Slack huddle control)
 - Automation permission for Chrome (Meet control)
 - Chrome: *Allow JavaScript from Apple Events* (View ▸ Developer)
+
+If Meet doesn't respond, this Chrome toggle is almost always why — it's runtime state, so a Chrome relaunch or update silently resets it:
+
+![Chrome View ▸ Developer ▸ Allow JavaScript from Apple Events](img/allow-javascript-from-apple-events.png)
 
 ## Build
 

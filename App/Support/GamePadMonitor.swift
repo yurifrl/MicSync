@@ -11,22 +11,20 @@ import GameController
 //   buttonA, buttonB, buttonX, buttonY, dpadUp, dpadDown, dpadLeft,
 //   dpadRight, leftShoulder, rightShoulder, leftTrigger, rightTrigger,
 //   buttonMenu (start), buttonOptions (select)
-// Action strings: "toggle" | "mute" | "unmute" | "ptt" | "switch".
+// Action strings: "toggle" | "mute" | "unmute" | "ptt".
 // Absent or invalid keys fall back to DefaultBindings.
 final class GamePadMonitor {
     static let shared = GamePadMonitor()
 
-    static let actionKeys: Set<String> = ["toggle", "mute", "unmute", "ptt", "switch"]
+    static let actionKeys: Set<String> = ["toggle", "mute", "unmute", "ptt"]
 
     // Positional defaults: A = toggle, B = push-to-talk (hold), X = mute,
-    // Y = unmute, select = switch target. start (buttonMenu) and everything
-    // else ship unbound.
+    // Y = unmute. start (buttonMenu) and everything else ship unbound.
     static let defaultBindings: [String: String] = [
         "buttonA": "toggle",
         "buttonB": "ptt",
         "buttonX": "mute",
         "buttonY": "unmute",
-        "buttonOptions": "switch",
     ]
 
     /// Per-controller scratch state so a disconnect can release a held
@@ -167,7 +165,6 @@ final class GamePadMonitor {
         case "toggle" where down: engine.toggle()
         case "mute" where down: engine.mute()
         case "unmute" where down: engine.unmute()
-        case "switch" where down: engine.switchTarget()
         case "ptt": engine.pushToTalk(down: down) // fires on press AND release edge
         default: break // release edge of a momentary action is a no-op
         }

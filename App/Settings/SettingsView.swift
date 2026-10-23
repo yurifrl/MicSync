@@ -68,7 +68,6 @@ struct SettingsView: View {
                 shortcutRow("Mute", name: .muteMic)
                 shortcutRow("Unmute", name: .unmuteMic)
                 shortcutRow("Push to Talk", name: .pushToTalk)
-                shortcutRow("Switch Meet/Slack Target", name: .switchTarget)
             }
 
             Section("About") {

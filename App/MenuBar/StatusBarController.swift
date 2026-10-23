@@ -2,10 +2,9 @@ import AppKit
 import Combine
 import LaunchAtLogin
 
-// Owns the NSStatusItem. Title glyph mirrors the engine's desired state;
-// when both sessions are live a " (M)"/" (S)" suffix shows the effective
-// target (pinned, or Auto which resolves Meet-first). The menu is rebuilt
-// from live engine state every time it opens.
+// Owns the NSStatusItem. Plain left-click toggles the mic directly; the
+// menu opens on right-click (or option-click). Title is a bare glyph —
+// no suffixes. The menu is rebuilt from live engine state on every open.
 final class StatusBarController: NSObject, NSMenuDelegate {
     private let engine: SyncEngine
     private let onOpenSettings: () -> Void
@@ -24,7 +23,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.delegate = self
         menu.autoenablesItems = false
-        statusItem.menu = menu // click opens the menu
+        // No automatic menu on click: the button handles left-click itself.
+        statusItem.menu = nil
+        if let button = statusItem.button {
+            button.target = self
+            button.action = #selector(statusButtonClicked)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
         rebuildTitle()
         observeEngine()
     }
@@ -37,10 +42,23 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         NSStatusBar.system.removeStatusItem(statusItem)
     }
 
+    // MARK: - Status item button
+
+    @objc private func statusButtonClicked() {
+        let rightClick = NSApp.currentEvent?.type == .rightMouseUp
+            || (NSApp.currentEvent?.modifierFlags.contains(.option) ?? false)
+        if rightClick {
+            // Pop the options menu without consuming the click.
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        } else {
+            engine.toggle()
+        }
+    }
+
     // MARK: - Engine observation
 
     private func observeEngine() {
-        Publishers.CombineLatest3(engine.$desiredState, engine.$snapshots, engine.$pinnedTarget)
+        Publishers.CombineLatest(engine.$desiredState, engine.$snapshots)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.rebuildTitle() }
             .store(in: &cancellables)
@@ -68,15 +86,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         SessionKind.allCases.filter { engine.snapshots[$0]?.inCall == true }
     }
 
-    private var bothLive: Bool { liveSessions.count >= 2 }
-
     private func rebuildTitle() {
-        var title = glyph
-        if bothLive {
-            // Engine Auto is Meet-first by adapter order.
-            title += engine.pinnedTarget == .slack ? " (S)" : " (M)"
-        }
-        statusItem.button?.title = title
+        statusItem.button?.title = glyph
     }
 
     // MARK: - Menu (rebuilt on every open)
@@ -84,22 +95,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
+        for kind in liveSessions {
+            let state = engine.snapshots[kind]?.state ?? .unknown
+            menu.addItem(disabledItem("\(kind.displayName): \(state.label)"))
+        }
         if liveSessions.isEmpty {
             menu.addItem(disabledItem("No active sessions"))
-        } else {
-            for kind in liveSessions {
-                let state = engine.snapshots[kind]?.state ?? .unknown
-                menu.addItem(disabledItem("\(kind.displayName): \(state.label)"))
-            }
         }
-        let targetLine: String = {
-            switch engine.pinnedTarget {
-            case .meet: return "Target: Meet (pinned)"
-            case .slack: return "Target: Slack (pinned)"
-            case nil: return "Target: Auto (Meet first)"
-            }
-        }()
-        menu.addItem(disabledItem(targetLine))
 
         menu.addItem(.separator())
         add("Toggle Mic", action: #selector(toggleMicAction), enabled: !liveSessions.isEmpty)
@@ -107,13 +109,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         add("Unmute", action: #selector(unmuteAction), enabled: !liveSessions.isEmpty)
 
         menu.addItem(.separator())
-        // switchTarget() cycles meet -> slack -> auto; a direct pin has no
-        // engine API by contract, so the menu cycles like the shortcut does.
-        add("Switch Meet/Slack Target", action: #selector(switchTargetAction), enabled: bothLive)
-
-        menu.addItem(.separator())
         add("Settings…", action: #selector(openSettingsAction), enabled: true)
-        add("Launch at Login", action: #selector(toggleLoginAction), enabled: true, checked: LaunchAtLogin.isEnabled)
+        add(
+            "Launch at Login",
+            action: #selector(toggleLoginAction(_:)),
+            enabled: true,
+            checked: LaunchAtLogin.isEnabled
+        )
+
         menu.addItem(.separator())
         add("Quit MicSync", action: #selector(quitAction), enabled: true)
     }
@@ -123,12 +126,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func toggleMicAction() { engine.toggle() }
     @objc private func muteAction() { engine.mute() }
     @objc private func unmuteAction() { engine.unmute() }
-    @objc private func switchTargetAction() { engine.switchTarget() }
     @objc private func openSettingsAction() { onOpenSettings() }
 
     @objc private func toggleLoginAction(_ sender: NSMenuItem) {
         LaunchAtLogin.isEnabled.toggle()
-        sender.state = LaunchAtLogin.isEnabled ? .on : .off
     }
 
     @objc private func quitAction() {

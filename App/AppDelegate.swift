@@ -65,7 +65,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeyboardShortcuts.onKeyUp(for: .unmuteMic) { [weak self] in self?.engine.unmute() }
         KeyboardShortcuts.onKeyDown(for: .pushToTalk) { [weak self] in self?.engine.pushToTalk(down: true) }
         KeyboardShortcuts.onKeyUp(for: .pushToTalk) { [weak self] in self?.engine.pushToTalk(down: false) }
-        KeyboardShortcuts.onKeyUp(for: .switchTarget) { [weak self] in self?.engine.switchTarget() }
     }
 
     // MARK: - Settings window (created lazily, kept alive for reopen)

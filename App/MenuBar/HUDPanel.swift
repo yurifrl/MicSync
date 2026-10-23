@@ -15,6 +15,7 @@ final class HUDPanel: NSPanel {
     // newer event is already fading it back in.
     private var showGeneration = 0
     private var micStateObserver: NSObjectProtocol?
+    private var setupIssueObserver: NSObjectProtocol?
 
     init(engine: SyncEngine) {
         self.engine = engine
@@ -43,11 +44,24 @@ final class HUDPanel: NSPanel {
         ) { [weak self] notification in
             self?.present(from: notification)
         }
+
+        // Chrome setup failure: show what to fix (bypasses the HUD-enabled
+        // preference — without this hint Meet control is simply dead).
+        setupIssueObserver = NotificationCenter.default.addObserver(
+            forName: MeetAdapter.micSetupIssue,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.presentSetupIssue(from: notification)
+        }
     }
 
     deinit {
         if let micStateObserver {
             NotificationCenter.default.removeObserver(micStateObserver)
+        }
+        if let setupIssueObserver {
+            NotificationCenter.default.removeObserver(setupIssueObserver)
         }
         dismissTimer?.invalidate()
     }
@@ -82,6 +96,39 @@ final class HUDPanel: NSPanel {
 
     // MARK: - Presentation
 
+    private func presentSetupIssue(from notification: Notification) {
+        appLabel.stringValue = "Chrome setup required"
+        stateLabel.stringValue = (notification.userInfo?["message"] as? String)
+            ?? "Enable View ▸ Developer ▸ Allow JavaScript from Apple Events"
+
+        showGeneration += 1
+        dismissTimer?.invalidate()
+        dismissTimer = nil
+
+        let size = card.fittingSize
+        setContentSize(size)
+        if let screen = NSScreen.main {
+            let origin = NSPoint(
+                x: screen.frame.midX - size.width / 2,
+                y: screen.frame.maxY - size.height - 48
+            )
+            setFrameOrigin(origin)
+        }
+
+        alphaValue = 0
+        orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animator().alphaValue = 1
+        }
+
+        let generation = showGeneration
+        dismissTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
+            self?.dismiss(generation: generation)
+        }
+    }
+
     private func present(from notification: Notification) {
         // Respect Preferences.hudEnabled at event time (checked live, no cache).
         guard Preferences().hudEnabled else { return }
@@ -89,7 +136,7 @@ final class HUDPanel: NSPanel {
         // Engine carries state + kind in userInfo; fall back to live engine
         // reads if the cast ever misses.
         let state = (notification.userInfo?["state"] as? MicState) ?? engine.desiredState ?? .unknown
-        let kind = (notification.userInfo?["kind"] as? SessionKind) ?? engine.pinnedTarget ?? .meet
+        let kind = (notification.userInfo?["kind"] as? SessionKind) ?? .meet
 
         switch state {
         case .live: stateLabel.stringValue = "🎙 Live"

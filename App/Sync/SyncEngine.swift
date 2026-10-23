@@ -19,8 +19,6 @@ final class SyncEngine: ObservableObject {
     @Published var snapshots: [SessionKind: SessionSnapshot] = [:]
     // nil = no live session to hold a state for.
     @Published var desiredState: MicState?
-    // User-pinned target while both sessions are live; nil = auto.
-    @Published var pinnedTarget: SessionKind?
 
     let adapters: [SessionKind: SessionAdapter]
 
@@ -42,13 +40,17 @@ final class SyncEngine: ObservableObject {
     // Public controls
     // ----------------------------------------------------------
 
-    // Flip the mic of the effective target (pinned target when both live).
+    // Flip the mic of the first live session; the resulting desired state
+    // is then enforced on every live session (mute once, all follow).
     func toggle() {
         queue.async { [weak self] in
             guard let self else { return }
-            guard let first = actionTargets().first,
-                  let snap = snapshots[first], snap.state != .unknown else { return }
-            desiredState = snap.state.flipped
+            let current = actionTargets().compactMap { kind -> MicState? in
+                let state = self.snapshots[kind]?.state
+                return (state == .live || state == .muted) ? state : nil
+            }
+            guard let state = current.first else { return }
+            desiredState = state.flipped
             enforce()
         }
     }
@@ -72,23 +74,6 @@ final class SyncEngine: ObservableObject {
     // Push-to-talk: while held the mic is live; release always ends muted.
     func pushToTalk(down: Bool) {
         down ? unmute() : mute()
-    }
-
-    // KP5-style target flip: meet -> slack -> nil (auto) -> meet.
-    func switchTarget() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            let live = liveKinds()
-            guard live.count >= 2 else {
-                setPinnedTarget(nil)
-                return
-            }
-            switch pinnedTarget {
-            case .none: setPinnedTarget(.meet)
-            case .meet: setPinnedTarget(.slack)
-            case .slack: setPinnedTarget(nil)
-            }
-        }
     }
 
     // ----------------------------------------------------------
@@ -131,7 +116,7 @@ final class SyncEngine: ObservableObject {
             DispatchQueue.main.async { self.snapshots = observed }
 
             // Session ended while a desired state was held -> drop it.
-            if desiredState != nil, liveKinds(in: observed).isEmpty {
+            if desiredState != nil, actionTargets(in: observed).isEmpty {
                 DispatchQueue.main.async { self.desiredState = nil }
                 return
             }
@@ -146,19 +131,11 @@ final class SyncEngine: ObservableObject {
     // Enforcement
     // ----------------------------------------------------------
 
-    // Sessions that should currently be driven to the desired state.
-    // With both live and a pinned target, only the pinned one.
+    // Sessions that should currently be driven to the desired state:
+    // every live session — mute once, all follow.
     private func actionTargets(in pool: [SessionKind: SessionSnapshot]? = nil) -> [SessionKind] {
         let table = pool ?? snapshots
-        let live = SessionKind.allCases.filter { table[$0]?.inCall == true }
-        if live.count >= 2, let pinned = pinnedTarget, live.contains(pinned) {
-            return [pinned]
-        }
-        return live
-    }
-
-    private func liveKinds(in pool: [SessionKind: SessionSnapshot]? = nil) -> [SessionKind] {
-        actionTargets(in: pool)
+        return SessionKind.allCases.filter { table[$0]?.inCall == true }
     }
 
     // Idempotent: adapters only press when their observed state differs.
@@ -204,10 +181,4 @@ final class SyncEngine: ObservableObject {
         }
     }
 
-    // Published setters must happen on the main thread.
-    private func setPinnedTarget(_ kind: SessionKind?) {
-        DispatchQueue.main.async { [weak self] in
-            self?.pinnedTarget = kind
-        }
-    }
 }

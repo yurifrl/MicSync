@@ -21,9 +21,4 @@ final class Preferences {
         set { defaults.set(newValue, forKey: "soundEnabled"); didChange() }
     }
 
-    // Target preference when both sessions are live: .meet wins by default.
-    var preferredTarget: String {
-        get { defaults.string(forKey: "preferredTarget") ?? "meet" }
-        set { defaults.set(newValue, forKey: "preferredTarget"); didChange() }
-    }
 }

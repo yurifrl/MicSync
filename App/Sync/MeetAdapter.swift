@@ -142,6 +142,7 @@ final class MeetAdapter: SessionAdapter {
                 checkSetupError(err)
                 return cb(nil, err)
             }
+            setupIssuePosted = false // a successful run clears the issue; a relapse re-alerts
             if out.contains("NOTAB") { return cb(nil, nil) }
             cb(out, nil)
         }

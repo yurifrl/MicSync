@@ -8,5 +8,4 @@ extension KeyboardShortcuts.Name {
     static let muteMic     = Self("muteMic")                          // force muted
     static let unmuteMic   = Self("unmuteMic")                        // force live
     static let pushToTalk  = Self("pushToTalk")                       // hold = live, release = muted
-    static let switchTarget = Self("switchTarget")                    // flip Meet/Slack when both live
 }
