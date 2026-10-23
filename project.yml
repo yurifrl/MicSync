@@ -1,0 +1,42 @@
+name: MicSync
+options:
+  bundleIdPrefix: com.yurifrl
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+packages:
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    from: 2.2.0
+  LaunchAtLogin-Modern:
+    url: https://github.com/sindresorhus/LaunchAtLogin-Modern
+    from: 1.0.0
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: MFTS39V3F9
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: true
+
+targets:
+  MicSync:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    dependencies:
+      - package: KeyboardShortcuts
+      - package: LaunchAtLogin-Modern
+        product: LaunchAtLogin
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yurifrl.micsync
+        PRODUCT_NAME: MicSync
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/MicSync.entitlements
+        GENERATE_INFOPLIST_FILE: false
+        SWIFT_EMIT_LOC_STRINGS: false

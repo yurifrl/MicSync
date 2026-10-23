@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+DerivedData/
+derivedData/
+.derivedData/
+MicSync.xcodeproj
+build/
+*.dmg
+SHA256SUMS
+.git/
