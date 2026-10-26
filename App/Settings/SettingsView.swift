@@ -1,3 +1,4 @@
+import AppKit
 import KeyboardShortcuts
 import SwiftUI
 
@@ -52,11 +53,24 @@ struct SettingsView: View {
             Text("Pairing URL")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Text(url ?? "Generating…")
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .lineLimit(2)
-                .minimumScaleFactor(0.7)
+            HStack(spacing: 8) {
+                Text(url ?? "Generating…")
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                    .truncationMode(.middle)
+                if url != nil {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(url ?? "", forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy pairing URL")
+                }
+            }
             if let qr = QRCodeImage(url: url) {
                 qr
             }
