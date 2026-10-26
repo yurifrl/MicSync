@@ -26,22 +26,46 @@
     return Array.from(document.querySelectorAll('button, [role="button"]'));
   }
 
-  function findButton(pattern, exclude) {
+  function findButton(pattern) {
     return (
       candidates().find((el) => {
         const label = labelOf(el);
         if (!label || !pattern.test(label)) return false;
-        if (exclude && exclude.test(label)) return false;
         const r = el.getBoundingClientRect();
         return r.width > 0 && r.height > 0; // skip hidden/duplicate overlays
       }) || null
     );
   }
 
+  // Self mic/camera controls live in the bottom control bar. Per-person
+  // mic labels (participant tiles, People rows) match the same patterns,
+  // so the search requires the label on the element itself (a tile whose
+  // descendant icon mentions the mic can never win), keeps the host-control
+  // exclusion, and ranks matches by proximity to the bottom-center anchor.
+  function findSelfButton(pattern) {
+    const anchorX = window.innerWidth / 2;
+    const anchorY = window.innerHeight;
+    let best = null;
+    let bestScore = Infinity;
+    for (const el of candidates()) {
+      const label =
+        el.getAttribute('aria-label') || el.dataset?.tooltip || el.getAttribute('title') || '';
+      if (!label || !pattern.test(label) || P.hostControls.test(label)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue; // skip hidden/duplicate overlays
+      const score = anchorY - r.bottom + Math.abs(r.left + r.width / 2 - anchorX);
+      if (score < bestScore) {
+        best = el;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
   function findControls() {
     return {
-      mic: findButton(P.mic, P.hostControls),
-      cam: findButton(P.camera, P.hostControls),
+      mic: findSelfButton(P.mic),
+      cam: findSelfButton(P.camera),
     };
   }
 
