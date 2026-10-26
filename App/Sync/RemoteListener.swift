@@ -35,10 +35,22 @@ final class RemoteListener {
     static let shared = RemoteListener()
 
     static var hostName: String {
-        // "Yuris-MacBook-Pro.local" → "Yuris-MacBook-Pro" (URL keeps .local).
-        Host.current().localizedName.map { name in
-            name.replacingOccurrences(of: " ", with: "-")
-        } ?? "micsync"
+        // gethostname() is the actual Bonjour-registered local hostname
+        // ("Yuris-MacBook-Pro-2"); localizedName is the display name and
+        // may contain apostrophes/parens ("Yuri's MacBook Pro (2)"), which
+        // are illegal in a DNS label and produce unscannable pairing URLs.
+        var name = [CChar](repeating: 0, count: Int(MAXHOSTNAMELEN))
+        guard gethostname(&name, Int(MAXHOSTNAMELEN)) == 0 else { return "micsync" }
+        let raw = String(cString: name)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .replacingOccurrences(of: ".local", with: "")
+        // Sanitize to [A-Za-z0-9-]; strip leading/trailing hyphens (RFC 952).
+        let clean = String(raw.map { $0.isLetter || $0.isNumber ? $0 : "-" })
+            .drop { $0 == "-" }
+            .reversed()
+            .drop { $0 == "-" }
+            .reversed()
+        return clean.isEmpty ? "micsync" : String(clean)
     }
 
     // ----------------------------------------------------------
@@ -196,28 +208,43 @@ final class RemoteListener {
     // HTTP routing
     // ----------------------------------------------------------
 
+    // CORS allow-all for browser clients; native apps ignore these.
+    private static let corsHeaders = ["Access-Control-Allow-Origin: *"]
+
     private func handleHTTP(_ request: WSServerCore.HTTPRequest) {
+        // Web (browser) clients always preflight credentialed-header requests;
+        // answer them regardless of the token so the pairing-page origin can
+        // reach /status. Native clients never send OPTIONS.
+        if request.method == "OPTIONS" {
+            request.respond("HTTP/1.1 204 No Content", [
+                "Access-Control-Allow-Origin: *",
+                "Access-Control-Allow-Methods: GET",
+                "Access-Control-Allow-Headers: Authorization",
+                "Access-Control-Max-Age: 600",
+            ], nil)
+            return
+        }
         // The pairing page is the QR destination: the token rides in the
         // URL fragment (#...), which browsers never transmit — the page
         // must be reachable without it. Everything else is token-gated.
         if request.path != "/" {
             guard authorized(request) else {
-                request.respond("HTTP/1.1 403 Forbidden", ["Content-Type: text/plain; charset=utf-8"], Data("forbidden".utf8))
+                request.respond("HTTP/1.1 403 Forbidden", ["Content-Type: text/plain; charset=utf-8"] + Self.corsHeaders, Data("forbidden".utf8))
                 return
             }
         }
         switch request.path {
         case "/":
-            request.respond("HTTP/1.1 200 OK", ["Content-Type: text/html; charset=utf-8"], Data(Self.pairingPage(token: token ?? "").utf8))
+            request.respond("HTTP/1.1 200 OK", ["Content-Type: text/html; charset=utf-8"] + Self.corsHeaders, Data(Self.pairingPage(token: token ?? "").utf8))
         case "/status":
             // The engine publishes on main; build the payload there.
             DispatchQueue.main.async { [weak self] in
-                request.respond("HTTP/1.1 200 OK", ["Content-Type: application/json"], self?.statusBody() ?? Data("{}".utf8))
+                request.respond("HTTP/1.1 200 OK", ["Content-Type: application/json"] + Self.corsHeaders, self?.statusBody() ?? Data("{}".utf8))
             }
         case "/mute", "/unmute", "/toggle", "/ptt/1", "/ptt/0":
             dispatchCommand(request)
         default:
-            request.respond("HTTP/1.1 404 Not Found", ["Content-Type: text/plain; charset=utf-8"], Data("not found".utf8))
+            request.respond("HTTP/1.1 404 Not Found", ["Content-Type: text/plain; charset=utf-8"] + Self.corsHeaders, Data("not found".utf8))
         }
     }
 
@@ -285,9 +312,9 @@ final class RemoteListener {
                 let body = self?.statusBody() ?? Data()
                 self?.queue.async {
                     if ok {
-                        request.respond("HTTP/1.1 200 OK", ["Content-Type: application/json"], body)
+                        request.respond("HTTP/1.1 200 OK", ["Content-Type: application/json"] + Self.corsHeaders, body)
                     } else {
-                        request.respond("HTTP/1.1 409 Conflict", ["Content-Type: application/json"], body)
+                        request.respond("HTTP/1.1 409 Conflict", ["Content-Type: application/json"] + Self.corsHeaders, body)
                     }
                 }
             }
